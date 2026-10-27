@@ -1,0 +1,85 @@
+name: Compila la mod
+
+# Parte da sola ogni volta che carichi o modifichi file nel repository,
+# oppure a mano da Actions > "Compila la mod" > Run workflow.
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # serve per pubblicare il .jar nelle Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@v4
+
+      - name: Trova il progetto (se hai caricato lo zip, lo estrae)
+        run: |
+          set -e
+          if [ -f build.gradle ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+            exit 0
+          fi
+          ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n 1)
+          if [ -z "$ZIP" ]; then
+            echo "::error::Non trovo build.gradle ne un file .zip nella radice del repository"
+            exit 1
+          fi
+          echo "Estraggo $ZIP"
+          mkdir -p _project
+          unzip -q -o "$ZIP" -d _project
+          GRADLE_FILE=$(find _project -name build.gradle | head -n 1)
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "::error::Lo zip non contiene un build.gradle"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$(dirname "$GRADLE_FILE")" >> "$GITHUB_ENV"
+
+      - name: Installa Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Installa Gradle 8.14.3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+
+      - name: Compila la mod
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle build --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
+          ls -la build/libs
+
+      - name: Mostra gli errori nel riepilogo (solo se la compilazione fallisce)
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo "## Errori di compilazione"
+            echo '```'
+            grep -E "error:|What went wrong|FAILURE" -A3 build.log | head -n 120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Salva il .jar come artefatto
+        uses: actions/upload-artifact@v4
+        with:
+          name: mountain-king-jar
+          path: ${{ env.PROJECT_DIR }}/build/libs/*.jar
+          if-no-files-found: error
+
+      - name: Pubblica il .jar nelle Release (si scarica anche da telefono)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Mountain King - build ${{ github.run_number }}
+          body: Jar compilato automaticamente. Va messo nella cartella mods di Minecraft 1.21.1 con NeoForge.
+          files: ${{ env.PROJECT_DIR }}/build/libs/*.jar
